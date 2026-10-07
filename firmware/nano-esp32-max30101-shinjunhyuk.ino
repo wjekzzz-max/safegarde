@@ -5,7 +5,7 @@
 #include <HTTPClient.h>
 #include <WiFiClient.h>
 #include "MAX30105.h"
-#include "heartRate.h"
+#include "spo2_algorithm.h"
 
 const char* WIFI_SSID = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
@@ -18,27 +18,23 @@ const char* DEVICE_API_KEY = "";
 
 const int RESET_BUTTON = D5; // Optional button from D5 to GND.
 const long WRIST_THRESHOLD = 10000;
-const byte RATE_SIZE = 4;
-const uint16_t SPO2_WINDOW = 100;
-const unsigned long SAMPLE_INTERVAL_MS = 10;
+const int32_t SPO2_WINDOW = 100;
+const int32_t SPO2_RECALC_SAMPLES = 25;
 const unsigned long SEND_INTERVAL_MS = 1000;
 
 MAX30105 heartSensor;
-byte rates[RATE_SIZE] = {0, 0, 0, 0};
-byte rateSpot = 0;
-long lastBeat = 0;
+uint32_t irSamples[SPO2_WINDOW];
+uint32_t redSamples[SPO2_WINDOW];
+int32_t sampleCount = 0;
+int32_t samplesSinceCalculation = 0;
 int averageBPM = 0;
 bool wristDetected = false;
 int spo2 = 0;
 int signalQuality = 0;
-bool spo2Valid = false;
-long irSamples[SPO2_WINDOW];
-long redSamples[SPO2_WINDOW];
-uint16_t sampleCount = 0;
-uint16_t sampleIndex = 0;
+int8_t heartRateValid = 0;
+int8_t spo2Valid = 0;
 long latestIR = 0;
 long latestRed = 0;
-unsigned long lastSampleTime = 0;
 unsigned long lastSendTime = 0;
 unsigned long lastWifiAttempt = 0;
 bool lastButtonState = HIGH;
@@ -47,13 +43,12 @@ const unsigned long DEBOUNCE_MS = 50;
 
 void resetMeasurements() {
   averageBPM = 0;
-  lastBeat = 0;
-  rateSpot = 0;
-  for (byte i = 0; i < RATE_SIZE; i++) rates[i] = 0;
   sampleCount = 0;
-  sampleIndex = 0;
+  samplesSinceCalculation = 0;
   spo2 = 0;
   spo2Valid = false;
+  heartRateValid = false;
+  signalQuality = 0;
   Serial.println("Measurements reset");
 }
 
@@ -74,62 +69,45 @@ void readButton() {
   lastButtonState = buttonState;
 }
 
-void updateHeartRate(long irValue) {
-  if (!checkForBeat(irValue)) return;
-  const long now = millis();
-  const long delta = now - lastBeat;
-  lastBeat = now;
-  if (delta <= 0) return;
-
-  const float bpm = 60000.0f / delta;
-  if (bpm < 40 || bpm > 200) return;
-  rates[rateSpot] = (byte)bpm;
-  rateSpot = (rateSpot + 1) % RATE_SIZE;
-
-  int total = 0;
-  int validCount = 0;
-  for (byte i = 0; i < RATE_SIZE; i++) {
-    if (rates[i] > 0) { total += rates[i]; validCount++; }
-  }
-  if (validCount > 0) averageBPM = total / validCount;
-}
-
-void updateSpO2(long irValue, long redValue) {
-  if (millis() - lastSampleTime < SAMPLE_INTERVAL_MS) return;
-  lastSampleTime = millis();
-  irSamples[sampleIndex] = irValue;
-  redSamples[sampleIndex] = redValue;
-  sampleIndex = (sampleIndex + 1) % SPO2_WINDOW;
-  if (sampleCount < SPO2_WINDOW) sampleCount++;
-  if (sampleCount < SPO2_WINDOW || !wristDetected) return;
-
-  long irMin = LONG_MAX, redMin = LONG_MAX;
-  long irMax = 0, redMax = 0, irSum = 0, redSum = 0;
-  for (uint16_t i = 0; i < SPO2_WINDOW; i++) {
-    irMin = min(irMin, irSamples[i]);
-    irMax = max(irMax, irSamples[i]);
-    redMin = min(redMin, redSamples[i]);
-    redMax = max(redMax, redSamples[i]);
-    irSum += irSamples[i];
-    redSum += redSamples[i];
+void addSensorSample(uint32_t irValue, uint32_t redValue) {
+  if (sampleCount < SPO2_WINDOW) {
+    irSamples[sampleCount] = irValue;
+    redSamples[sampleCount] = redValue;
+    sampleCount++;
+  } else {
+    for (int32_t i = 1; i < SPO2_WINDOW; i++) {
+      irSamples[i - 1] = irSamples[i];
+      redSamples[i - 1] = redSamples[i];
+    }
+    irSamples[SPO2_WINDOW - 1] = irValue;
+    redSamples[SPO2_WINDOW - 1] = redValue;
   }
 
-  const float irDc = irSum / (float)SPO2_WINDOW;
-  const float redDc = redSum / (float)SPO2_WINDOW;
-  const float irAc = irMax - irMin;
-  const float redAc = redMax - redMin;
-  if (irDc <= 0 || redDc <= 0 || irAc < 100 || redAc < 100) {
-    spo2Valid = false;
+  samplesSinceCalculation++;
+  if (sampleCount < SPO2_WINDOW || samplesSinceCalculation < SPO2_RECALC_SAMPLES) return;
+  samplesSinceCalculation = 0;
+
+  int32_t calculatedBPM = 0;
+  int32_t calculatedSpO2 = 0;
+  int8_t calculatedHeartRateValid = 0;
+  int8_t calculatedSpO2Valid = 0;
+  maxim_heart_rate_and_oxygen_saturation(
+    irSamples, SPO2_WINDOW, redSamples,
+    &calculatedSpO2, &calculatedSpO2Valid,
+    &calculatedBPM, &calculatedHeartRateValid
+  );
+
+  heartRateValid = calculatedHeartRateValid;
+  spo2Valid = calculatedSpO2Valid;
+  averageBPM = (heartRateValid && calculatedBPM >= 40 && calculatedBPM <= 200)
+    ? calculatedBPM : 0;
+  spo2 = (spo2Valid && calculatedSpO2 >= 70 && calculatedSpO2 <= 100)
+    ? calculatedSpO2 : 0;
+  if (averageBPM == 0 || spo2 == 0) {
     signalQuality = 30;
-    return;
+  } else {
+    signalQuality = 80;
   }
-
-  // Prototype ratio-of-ratios estimate. Validate against a trusted oximeter;
-  // MAX30101 readings are not medical measurements.
-  const float ratio = (redAc / redDc) / (irAc / irDc);
-  spo2 = constrain((int)roundf(110.0f - 25.0f * ratio), 70, 100);
-  spo2Valid = true;
-  signalQuality = constrain((int)(irAc / 150.0f), 40, 100);
 }
 
 void sendTelemetry() {
@@ -185,21 +163,25 @@ void loop() {
   readButton();
   connectWiFi();
 
-  latestIR = heartSensor.getIR();
-  latestRed = heartSensor.getRed();
-  wristDetected = latestIR > WRIST_THRESHOLD;
+  // Drain the sensor FIFO. getIR()/getRed() alone can repeatedly return an old sample.
+  heartSensor.check();
+  while (heartSensor.available()) {
+    latestIR = heartSensor.getIR();
+    latestRed = heartSensor.getRed();
+    heartSensor.nextSample();
+    wristDetected = latestIR > WRIST_THRESHOLD;
 
-  if (wristDetected) {
-    updateHeartRate(latestIR);
-    updateSpO2(latestIR, latestRed);
-  } else {
-    averageBPM = 0;
-    spo2 = 0;
-    spo2Valid = false;
-    signalQuality = 0;
-    sampleCount = 0;
-    sampleIndex = 0;
-    lastBeat = 0;
+    if (wristDetected) {
+      addSensorSample((uint32_t)latestIR, (uint32_t)latestRed);
+    } else {
+      averageBPM = 0;
+      spo2 = 0;
+      spo2Valid = false;
+      heartRateValid = false;
+      signalQuality = 0;
+      sampleCount = 0;
+      samplesSinceCalculation = 0;
+    }
   }
 
   sendTelemetry();

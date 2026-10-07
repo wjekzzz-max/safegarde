@@ -5,6 +5,8 @@ const request = async (path, options) => {
 };
 export const api = {
   dashboard: () => request('/dashboard'),
-  acknowledge: (id) => request(`/alerts/${id}/acknowledge`, { method: 'PATCH' }),
-  simulate: (scenario) => request('/simulation', { method: 'POST', body: JSON.stringify({ scenario }) }),
+  scheduleDanger: (workerId, seconds, rampSeconds) => request('/settings/timed-danger', { method: 'POST', body: JSON.stringify({ workerId, seconds, rampSeconds }) }),
+  resetWorker: (workerId) => request('/settings/reset-normal', { method: 'POST', body: JSON.stringify({ workerId }) }),
+  dangerButton: (workerId) => request(`/workers/${workerId}/danger-button`, { method: 'POST' }),
+  deleteAlert: (id) => request(`/alerts/${id}`, { method: 'DELETE' }),
 };

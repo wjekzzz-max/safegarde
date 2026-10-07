@@ -50,7 +50,8 @@ safe-main/
 │  ├─ mockData.js                 작업자, MAX30102, IMU 초기 데이터
 │  └─ safety.js                   생체신호 및 넘어짐 판정
 └─ firmware/
-   └─ nano-esp32-max30102-imu.ino Arduino Nano ESP32 HTTPS 전송 예제
+   ├─ nano-esp32-max30102-imu.ino 기존 HTTPS 자리표시자 예제
+   └─ nano-esp32-max30101-shinjunhyuk.ino 신준혁용 MAX30101 Wi-Fi 연동 스케치
 ```
 
 기존 `src/main.js`, `src/mockData.js`, `src/dataService.js`, `src/config.js` 등은 이전 바닐라 JavaScript 구현 파일이며 현재 React 앱의 진입점에서는 사용하지 않습니다.
@@ -429,21 +430,21 @@ X-Device-Key: 충분히-길고-예측하기-어려운-비밀키
 
 ### 3. Nano ESP32 펌웨어 설정
 
-`firmware/nano-esp32-max30102-imu.ino`에서 다음 값을 수정합니다.
+신준혁의 MAX30101 손목 센서 연결에는 [신준혁용 연동 스케치](firmware/nano-esp32-max30101-shinjunhyuk.ino)를 사용합니다. 이 스케치는 현재 개발 PC와 Nano ESP32가 같은 Wi-Fi에 연결된 로컬 테스트용입니다. 서버와 실제 네트워크 주소가 있는 상태에서 다음 값을 수정합니다.
 
 ```cpp
-const char* WIFI_SSID = "작업 현장 Wi-Fi";
-const char* WIFI_PASSWORD = "Wi-Fi 비밀번호";
-const char* API_URL = "https://api.example.com/api/telemetry";
-const char* DEVICE_API_KEY = "서버와 동일한 장치 API 키";
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* API_URL = "http://개발PC의-로컬-IP:4000/api/telemetry";
+const char* DEVICE_NAME = "SAFE-NANO-001";
 ```
 
-펌웨어는 Nano ESP32에서 지원하는 `WiFi.h`, `HTTPClient.h`, `WiFiClientSecure.h`를 사용합니다. 개발 예제는 연결 확인을 쉽게 하기 위해 `secureClient.setInsecure()`를 사용하지만, 실제 운영에서는 서버의 CA 인증서를 장치에 등록해 HTTPS 인증서를 검증해야 합니다.
+Arduino IDE에서 `SparkFun MAX3010x Sensor Library`를 설치하고, `Arduino Nano ESP32` 보드를 선택합니다. `SAFE-NANO-001`은 서버의 신준혁 작업자에 연결된 장치 이름입니다. 이 펌웨어는 BPM, SpO₂ 추정치, IR/Red 원시값을 전송합니다. SpO₂는 프로토타입 추정치이며 의료 측정값이 아닙니다. 스케치에는 IMU가 포함되어 있지 않습니다.
 
 ### 4. 업로드 및 확인
 
 1. Arduino IDE에서 보드를 `Arduino Nano ESP32`로 선택합니다.
-2. Wi-Fi 정보, 공용 API 주소 및 장치 API 키를 입력합니다.
+2. Wi-Fi 이름/비밀번호와 개발 PC의 로컬 IPv4 주소를 입력합니다. `ipconfig` 출력의 현재 Wi-Fi 어댑터 IPv4 주소를 사용합니다. `localhost`는 입력하지 않습니다.
 3. 펌웨어를 업로드합니다.
 4. 시리얼 모니터를 115200 baud로 엽니다.
 5. HTTP 상태 코드가 `200`인지 확인합니다.

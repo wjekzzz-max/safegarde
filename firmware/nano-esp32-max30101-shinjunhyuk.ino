@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <WiFiClient.h>
 #include "MAX30105.h"
+#include "heartRate.h"
 #include "spo2_algorithm.h"
 
 const char* WIFI_SSID = "YOUR_WIFI_SSID";
@@ -18,6 +19,7 @@ const char* DEVICE_API_KEY = "";
 
 const int RESET_BUTTON = D5; // Optional button from D5 to GND.
 const long WRIST_THRESHOLD = 10000;
+const byte RATE_SIZE = 4;
 const int32_t SPO2_WINDOW = 100;
 const int32_t SPO2_RECALC_SAMPLES = 25;
 const unsigned long SEND_INTERVAL_MS = 1000;
@@ -27,12 +29,18 @@ uint32_t irSamples[SPO2_WINDOW];
 uint32_t redSamples[SPO2_WINDOW];
 int32_t sampleCount = 0;
 int32_t samplesSinceCalculation = 0;
+uint32_t totalSensorSamples = 0;
+uint32_t lastBeatSample = 0;
+byte bpmRates[RATE_SIZE] = {0, 0, 0, 0};
+byte bpmRateIndex = 0;
 int averageBPM = 0;
 bool wristDetected = false;
 int spo2 = 0;
 int signalQuality = 0;
 int8_t heartRateValid = 0;
 int8_t spo2Valid = 0;
+int32_t algorithmBPM = 0;
+int32_t algorithmSpO2 = 0;
 long latestIR = 0;
 long latestRed = 0;
 unsigned long lastSendTime = 0;
@@ -45,6 +53,10 @@ void resetMeasurements() {
   averageBPM = 0;
   sampleCount = 0;
   samplesSinceCalculation = 0;
+  totalSensorSamples = 0;
+  lastBeatSample = 0;
+  bpmRateIndex = 0;
+  for (byte i = 0; i < RATE_SIZE; i++) bpmRates[i] = 0;
   spo2 = 0;
   spo2Valid = false;
   heartRateValid = false;
@@ -70,6 +82,26 @@ void readButton() {
 }
 
 void addSensorSample(uint32_t irValue, uint32_t redValue) {
+  totalSensorSamples++;
+  if (checkForBeat((long)irValue)) {
+    if (lastBeatSample != 0) {
+      const uint32_t sampleDelta = totalSensorSamples - lastBeatSample;
+      // setup() uses 100 samples/sec averaged by four: 25 effective samples/sec.
+      const int measuredBPM = sampleDelta > 0 ? (1500 / sampleDelta) : 0;
+      if (measuredBPM >= 40 && measuredBPM <= 200) {
+        bpmRates[bpmRateIndex] = (byte)measuredBPM;
+        bpmRateIndex = (bpmRateIndex + 1) % RATE_SIZE;
+        int sum = 0;
+        int count = 0;
+        for (byte i = 0; i < RATE_SIZE; i++) {
+          if (bpmRates[i] > 0) { sum += bpmRates[i]; count++; }
+        }
+        if (count > 0) averageBPM = sum / count;
+      }
+    }
+    lastBeatSample = totalSensorSamples;
+  }
+
   if (sampleCount < SPO2_WINDOW) {
     irSamples[sampleCount] = irValue;
     redSamples[sampleCount] = redValue;
@@ -97,10 +129,13 @@ void addSensorSample(uint32_t irValue, uint32_t redValue) {
     &calculatedBPM, &calculatedHeartRateValid
   );
 
+  algorithmBPM = calculatedBPM;
+  algorithmSpO2 = calculatedSpO2;
   heartRateValid = calculatedHeartRateValid;
   spo2Valid = calculatedSpO2Valid;
-  averageBPM = (heartRateValid && calculatedBPM >= 40 && calculatedBPM <= 200)
-    ? calculatedBPM : 0;
+  if (averageBPM == 0 && heartRateValid && calculatedBPM >= 40 && calculatedBPM <= 200) {
+    averageBPM = calculatedBPM;
+  }
   spo2 = (spo2Valid && calculatedSpO2 >= 70 && calculatedSpO2 <= 100)
     ? calculatedSpO2 : 0;
   if (averageBPM == 0 || spo2 == 0) {
@@ -136,7 +171,10 @@ void sendTelemetry() {
     + ",\"rssi\":" + String(WiFi.RSSI()) + "}";
 
   const int statusCode = http.POST(body);
-  Serial.printf("HTTP %d | BPM %d | SpO2 %d | wearing %s\n", statusCode, averageBPM, reportedSpo2, wristDetected ? "yes" : "no");
+  Serial.printf("HTTP %d | BPM %d (alg %ld valid %d) | SpO2 %d (alg %ld valid %d) | IR %ld RED %ld | samples %ld | wearing %s\n",
+    statusCode, averageBPM, (long)algorithmBPM, heartRateValid,
+    reportedSpo2, (long)algorithmSpO2, spo2Valid,
+    latestIR, latestRed, (long)sampleCount, wristDetected ? "yes" : "no");
   if (statusCode < 0) Serial.println(http.errorToString(statusCode));
   http.end();
 }
@@ -181,6 +219,10 @@ void loop() {
       signalQuality = 0;
       sampleCount = 0;
       samplesSinceCalculation = 0;
+      totalSensorSamples = 0;
+      lastBeatSample = 0;
+      bpmRateIndex = 0;
+      for (byte i = 0; i < RATE_SIZE; i++) bpmRates[i] = 0;
     }
   }
 
